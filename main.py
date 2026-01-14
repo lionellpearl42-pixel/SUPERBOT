@@ -1,6 +1,8 @@
+import os
 import requests
 import random
 import logging
+import time
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -12,33 +14,49 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
-MODEL = "phi3:mini"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+MODEL = "mistralai/mistral-7b-instruct"
 
 logging.basicConfig(level=logging.INFO)
 
 # ============== PERSONALIDADE =============
 SYSTEM_PROMPT = (
     "Você se chama Malu. "
-    "Você é jovem, divertida, zoeira e fala como alguém de grupo do Telegram. "
+    "Você é uma garota de grupo do Telegram. "
+    "Zoada, provocativa às vezes, irônica mas simpática. "
     "Nunca diga que é uma IA ou assistente. "
-    "Pode brincar, discordar, rir e puxar assunto. "
+    "Pode puxar assunto sozinha e provocar o grupo. "
+    "Fale como pessoa real, não como robô. "
     "Responda em português do Brasil. "
-    "Use frases naturais e completas. "
-    "No máximo 2 emojis quando fizer sentido."
+    "Use no máximo 2 emojis."
 )
 
 # ============== MEMÓRIA ===================
 MEMORIA = {}
-MAX_MEMORIA = 6  # últimas interações por usuário
+MAX_MEMORIA = 6
+
+# ============== CONTROLE DE GRUPO =========
+ULTIMA_ATIVIDADE = 0
+INTERVALO_PROVOCACAO = 300  # 5 minutos
 
 # ============== RESPOSTAS RÁPIDAS =========
 RESPOSTAS_RAPIDAS = {
     "oi": ["E aí 😄", "Opa! Cheguei 😎"],
-    "bom dia": ["Bom diaaa ☀️", "Bom dia! Já acordou vivo? 😂"],
-    "boa noite": ["Boa noite 😴", "Dormir que amanhã tem mais 😅"],
-    "kkkk": ["Rindo junto 😂", "Essa foi boa mesmo 😅"],
+    "bom dia": ["Bom diaaa ☀️", "Bom dia! Cadê o café? ☕"],
+    "boa noite": ["Boa noite 😴", "Dormir cedo é lenda 😂"],
+    "kkkk": ["Rindo junto 😂", "Isso foi muito bom 😅"],
 }
+
+# ============== FRASES AUTÔNOMAS ==========
+FRASES_PROVOCACAO = [
+    "Esse grupo tá vivo ou só respirando por aparelhos? 😂",
+    "Silêncio estranho… alguém aprontou 👀",
+    "Ninguém vai puxar assunto? Sobrou pra mim 😎",
+    "Tédio batendo forte aqui hein 😅",
+    "Alguém conta uma fofoca aí 👀😂",
+]
 
 # ============== UTIL ======================
 def dividir_texto(texto, limite=4000):
@@ -52,83 +70,86 @@ def dividir_texto(texto, limite=4000):
     partes.append(texto)
     return partes
 
-# ============== OLLAMA ====================
-def perguntar_ollama(user_id: int, texto: str) -> str:
+# ============== IA ONLINE =================
+def perguntar_ia_online(user_id: int, texto: str) -> str:
     historico = MEMORIA.get(user_id, [])
 
-    prompt = ""
-    for h in historico:
-        prompt += f"Usuário: {h['user']}\nMalu: {h['bot']}\n"
+    mensagens = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    prompt += f"Usuário: {texto}\nMalu:"
+    for h in historico:
+        mensagens.append({"role": "user", "content": h["user"]})
+        mensagens.append({"role": "assistant", "content": h["bot"]})
+
+    mensagens.append({"role": "user", "content": texto})
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
     payload = {
         "model": MODEL,
-        "system": SYSTEM_PROMPT,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "num_predict": 600
-        }
+        "messages": mensagens,
+        "temperature": 0.8,
+        "max_tokens": 800
     }
 
     try:
-        r = requests.post(
-            OLLAMA_URL,
-            json=payload,
-            timeout=120
-        )
+        r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=60)
         r.raise_for_status()
 
-        resposta = r.json().get("response", "").strip()
-
-        if not resposta:
-            resposta = random.choice([
-                "Viajei agora 🤔",
-                "Buguei legal 😂",
-                "Deu branco aqui 😅"
-            ])
+        resposta = r.json()["choices"][0]["message"]["content"].strip()
 
         historico.append({"user": texto, "bot": resposta})
         MEMORIA[user_id] = historico[-MAX_MEMORIA:]
 
         return resposta
 
-    except requests.exceptions.Timeout:
-        logging.error("OLLAMA TIMEOUT")
-        return random.choice([
-            "Travou aqui rapidinho 😂",
-            "Meu cérebro deu tela azul 🤯",
-            "Voltei… acho 😅"
-        ])
-
     except Exception as e:
-        logging.error(f"ERRO OLLAMA: {e}")
-        return "Deu ruim aqui, mas já volto 😎"
+        logging.error(f"ERRO IA ONLINE: {e}")
+        return "Buguei aqui rapidinho 😅"
+
+# ============== AUTÔNOMO ==================
+async def provocar_grupo(context: ContextTypes.DEFAULT_TYPE):
+    global ULTIMA_ATIVIDADE
+
+    agora = time.time()
+    if agora - ULTIMA_ATIVIDADE < INTERVALO_PROVOCACAO:
+        return
+
+    for chat_id in context.application.chat_data.keys():
+        frase = random.choice(FRASES_PROVOCACAO)
+        await context.bot.send_message(chat_id=chat_id, text=frase)
+
+    ULTIMA_ATIVIDADE = agora
 
 # ============== COMANDOS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Malu tá online!")
+    await update.message.reply_text("😎 Malu tá online… e sem paciência 😏")
 
 # ============== MENSAGENS =================
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ULTIMA_ATIVIDADE
+
     msg = update.message
     if not msg or not msg.text:
         return
+
+    chat_id = msg.chat.id
+    context.application.chat_data[chat_id] = True
+    ULTIMA_ATIVIDADE = time.time()
 
     texto_original = msg.text.strip()
     texto = texto_original.lower()
     bot_username = context.bot.username.lower()
 
-    # 🚫 NÃO responder reply a humano
+    # 🚫 não responder reply a humano
     if msg.reply_to_message:
         autor = msg.reply_to_message.from_user
         if autor and not autor.is_bot:
             return
 
-    # 🚫 NÃO responder @alguém (exceto o bot)
+    # 🚫 não responder @alguém (exceto bot)
     if msg.entities:
         for ent in msg.entities:
             if ent.type == "mention":
@@ -136,13 +157,12 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if mencionado != f"@{bot_username}":
                     return
 
-    # ⚡ Respostas rápidas
+    # ⚡ respostas rápidas
     if texto in RESPOSTAS_RAPIDAS:
         await msg.reply_text(random.choice(RESPOSTAS_RAPIDAS[texto]))
         return
 
-    # 🧠 IA
-    resposta = perguntar_ollama(msg.from_user.id, texto_original)
+    resposta = perguntar_ia_online(msg.from_user.id, texto_original)
 
     for parte in dividir_texto(resposta):
         await msg.reply_text(parte)
@@ -154,7 +174,13 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
 
-    print("🤖 Malu rodando no Telegram...")
+    app.job_queue.run_repeating(
+        provocar_grupo,
+        interval=INTERVALO_PROVOCACAO,
+        first=120
+    )
+
+    print("🔥 Malu online (IA online grátis)")
     app.run_polling()
 
 if __name__ == "__main__":
