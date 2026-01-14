@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 # ================= CONFIG =================
-TOKEN = ""
+TOKEN = os.getenv("TOKEN")
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 MODEL = "phi3:mini"
 
